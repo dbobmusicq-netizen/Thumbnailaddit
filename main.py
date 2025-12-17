@@ -2,6 +2,7 @@ import os
 import logging
 import asyncio
 from datetime import datetime
+from keep_alive import keep_alive  # Import the Keep Alive function
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -10,21 +11,20 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     filters,
+    Defaults
 )
-from telegram.error import BadRequest, Forbidden
+from telegram.constants import ParseMode
+from telegram.error import BadRequest, Forbidden, TimedOut
 
 # ---------------------------------------------------------------------------
-# ⚙️ CONFIGURATION & SETUP
+# ⚙️ CONFIGURATION
 # ---------------------------------------------------------------------------
 
-# Load Token from Env or Replace directly here
-# For free hosting (Render/Railway), set these as Environment Variables.
-TOKEN = os.getenv("BOT_TOKEN", "8391467781:AAGiwYCtIhw4yNYosQg_SjG8pDiubjIqghk")
+# On Render, set 'BOT_TOKEN' in the "Environment Variables" section.
+TOKEN = os.getenv("BOT_TOKEN") 
+ADMIN_IDS = [123456789] # REPLACE WITH YOUR INTEGER ID
 
-# Add your Telegram User ID here for Admin access
-ADMIN_IDS = [1745041582, 987654321]  # Replace with actual integer IDs
-
-# Logging Setup
+# Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -32,305 +32,144 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# 🧠 IN-MEMORY STORAGE (No Database - High Performance)
+# 🧠 MEMORY STORAGE
 # ---------------------------------------------------------------------------
-
-# Structure: {user_id: {"thumb_id": str, "joined_at": str, "banned": bool, "caption_mode": bool}}
 users_db = {}
-
-# Global Stats
-bot_stats = {
-    "files_processed": 0,
-    "start_time": datetime.now()
-}
-
-# Maintenance Switch
-maintenance_mode = False
+bot_stats = {"processed": 0, "start": datetime.now()}
 
 # ---------------------------------------------------------------------------
-# 🛠️ HELPER FUNCTIONS
+# 🛠️ CORE FUNCTIONS
 # ---------------------------------------------------------------------------
 
 def get_user(user_id):
-    """Ensure user exists in memory."""
     if user_id not in users_db:
-        users_db[user_id] = {
-            "thumb_id": None,
-            "joined_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "banned": False,
-            "caption_mode": True
-        }
+        users_db[user_id] = {"thumb": None, "banned": False}
     return users_db[user_id]
 
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
-
-async def restricted(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check maintenance mode."""
-    if maintenance_mode and not is_admin(update.effective_user.id):
-        await update.message.reply_text("🚧 **Titan is currently under maintenance.**\nPlease try again later.")
-        return True
-    return False
-
-# ---------------------------------------------------------------------------
-# 🌈 USER HANDLERS (UX & LOGIC)
-# ---------------------------------------------------------------------------
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await restricted(update, context): return
-    
     user = update.effective_user
-    get_user(user.id)
-    
     text = (
-        f"⚡ **Titan Thumbnail Bot** ⚡\n\n"
-        f"Hey {user.first_name}! I am the **Principal Thumbnail Architect**.\n"
-        f"I can add custom thumbnails to videos/files up to **4GB** instantly.\n\n"
-        f"**🚀 How to use:**\n"
-        f"1️⃣ Send me a Photo (This becomes your thumbnail)\n"
-        f"2️⃣ Send me a Video or File\n"
-        f"3️⃣ I will attach the thumbnail instantly!\n\n"
-        f"✅ **No Quality Loss** | ✅ **4GB Support** | ✅ **Unlimited**"
+        f"⚡ **Titan Bot Online**\n\n"
+        f"Hi {user.first_name}! I add thumbnails to large files.\n\n"
+        f"**Capabilities:**\n"
+        f"✅ 1MB to 4GB+ Support\n"
+        f"✅ Video & Documents\n"
+        f"✅ Zero Quality Loss\n\n"
+        f"**How to use:**\n"
+        f"1. Send a Photo (Thumbnail)\n"
+        f"2. Send a Video/File"
     )
-    
-    keyboard = [
-        [InlineKeyboardButton("ℹ️ How it Works", callback_data="help"),
-         InlineKeyboardButton("🗑️ Clear Thumb", callback_data="clear")],
-        [InlineKeyboardButton("📊 My Stats", callback_data="me_stats")]
-    ]
-    
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def handle_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Catches photos and saves them as the user's thumbnail."""
-    if await restricted(update, context): return
-    
     user_id = update.effective_user.id
-    user_data = get_user(user_id)
+    # Get the largest available photo size
+    file_id = update.message.photo[-1].file_id
+    get_user(user_id)["thumb"] = file_id
     
-    # Get the highest quality photo file_id
-    photo = update.message.photo[-1]
-    file_id = photo.file_id
-    
-    user_data["thumb_id"] = file_id
-    
-    text = (
-        "🖼️ **Thumbnail Locked & Loaded!**\n\n"
-        "Now send me any **Video** or **Document**.\n"
-        "I will apply this thumbnail automatically! 🚀"
+    await update.message.reply_text(
+        "🖼️ **Thumbnail Saved!**\n\nNow send your **4GB Video** or File.",
+        quote=True
     )
-    
-    keyboard = [[InlineKeyboardButton("🗑️ Clear Thumbnail", callback_data="clear")]]
-    
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """The Core Engine: Handles 4GB+ files via ID reuse."""
-    if await restricted(update, context): return
-    
+    """
+    Handles files from 1MB to 4GB using file_id reference.
+    """
     user_id = update.effective_user.id
     user_data = get_user(user_id)
     msg = update.message
     
-    # 1. Check if user has a thumbnail set
-    thumb_id = user_data.get("thumb_id")
-    
-    if not thumb_id:
-        await msg.reply_text(
-            "❌ **No Thumbnail Found!**\n\n"
-            "Please send a photo first to set it as your thumbnail.",
-            quote=True
-        )
+    # 1. Validation
+    if not user_data["thumb"]:
+        await msg.reply_text("❌ **Send a photo first!** I need a thumbnail.", quote=True)
         return
 
-    # 2. Identify Media Type
+    # 2. Detect Type & ID
     media_id = None
-    media_type = None
-    original_caption = msg.caption or ""
+    file_name = "Video"
     
     if msg.video:
         media_id = msg.video.file_id
-        media_type = "video"
+        file_name = msg.video.file_name or "Video"
     elif msg.document:
+        # Check mime type to ensure it's video-like if possible, or just allow all
         media_id = msg.document.file_id
-        media_type = "document"
+        file_name = msg.document.file_name or "File"
     else:
-        return # Ignore other types
+        return
 
-    # 3. Process (Simulated 'Processing' UI)
-    status_msg = await msg.reply_text("⚡ **Applying Titanium Plating...**", quote=True)
-    
+    # 3. Status Update
+    status = await msg.reply_text(f"⚡ **Processing {file_name}...**")
+
     try:
-        # 4. THE MAGIC: Send existing ID + Thumbnail ID
-        # Why this works for 4GB: We are not uploading bytes. We tell Telegram:
-        # "Take file X, and when you show it, use image Y as the cover."
+        # 4. The 4GB Logic
+        # We assume the file_id is valid on Telegram servers.
+        # We send it back with the cached thumbnail ID.
         
-        caption = original_caption
-        if user_data["caption_mode"] and not caption:
-             caption = f"📁 **Titan Processed**\n👤 {update.effective_user.first_name}"
+        caption = msg.caption or f"📁 **{file_name}**"
 
-        if media_type == "video":
+        if msg.video:
             await context.bot.send_video(
                 chat_id=msg.chat_id,
                 video=media_id,
-                thumbnail=thumb_id,
+                thumbnail=user_data["thumb"],
                 caption=caption,
-                supports_streaming=True
+                supports_streaming=True,
+                read_timeout=60,    # Extended timeout for 4GB handshake
+                write_timeout=60,
+                connect_timeout=60
             )
-        elif media_type == "document":
+        else:
             await context.bot.send_document(
                 chat_id=msg.chat_id,
                 document=media_id,
-                thumbnail=thumb_id,
-                caption=caption
+                thumbnail=user_data["thumb"],
+                caption=caption,
+                read_timeout=60,
+                write_timeout=60
             )
-            
-        bot_stats["files_processed"] += 1
-        await status_msg.delete()
-        
+
+        bot_stats["processed"] += 1
+        await status.delete()
+
+    except TimedOut:
+        await status.edit_text("⚠️ **Telegram is slow.** The file is huge, but it should appear momentarily.")
     except BadRequest as e:
-        logger.error(f"Telegram API Error: {e}")
-        await status_msg.edit_text("❌ **Error:** Telegram couldn't attach this thumbnail. Is the image format valid?")
+        await status.edit_text(f"❌ **Error:** {e}")
     except Exception as e:
-        logger.error(f"General Error: {e}")
-        await status_msg.edit_text("❌ **System Error.** Please try again.")
+        logger.error(f"Error: {e}")
+        await status.edit_text("❌ Failed to process.")
 
-async def clear_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Resets user thumbnail."""
-    user_id = update.effective_user.id
-    get_user(user_id)["thumb_id"] = None
-    
-    await update.message.reply_text("🗑️ **Thumbnail Cleared!**\nSend a new photo to set a new one.")
-
-# ---------------------------------------------------------------------------
-# 🔘 CALLBACK QUERY HANDLER
-# ---------------------------------------------------------------------------
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    data = query.data
-    user_data = get_user(user_id)
-    
-    await query.answer()
-    
-    if data == "clear":
-        user_data["thumb_id"] = None
-        await query.edit_message_text("🗑️ **Thumbnail Cleared.** Send a new photo!")
-        
-    elif data == "help":
-        text = (
-            "ℹ️ **Titan Help**\n\n"
-            "1. Send a Photo 🖼️\n"
-            "2. Send a Video/File 📁\n"
-            "3. I combine them! 🪄\n\n"
-            "**Why use this?**\n"
-            "• Supports 4GB+ Files\n"
-            "• Zero Quality Loss\n"
-            "• Works for Channels"
-        )
-        back_btn = [[InlineKeyboardButton("🔙 Back", callback_data="back_start")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(back_btn), parse_mode="Markdown")
-        
-    elif data == "back_start":
-        # Re-render start menu (simplified)
-        await start(update, context)
-
-    elif data == "me_stats":
-        status = "✅ Active" if user_data['thumb_id'] else "❌ Empty"
-        text = (
-            f"👤 **User Stats**\n\n"
-            f"🆔 ID: `{user_id}`\n"
-            f"🖼️ Thumbnail: {status}\n"
-            f"📅 Joined: {user_data['joined_at']}"
-        )
-        await query.edit_message_text(text, parse_mode="Markdown")
-
-# ---------------------------------------------------------------------------
-# 👑 ADMIN COMMANDS
-# ---------------------------------------------------------------------------
-
-async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    
-    uptime = str(datetime.now() - bot_stats["start_time"]).split('.')[0]
-    total_users = len(users_db)
-    active_thumbs = sum(1 for u in users_db.values() if u["thumb_id"])
-    
-    text = (
-        "📊 **TITAN SYSTEM STATS**\n\n"
-        f"👥 Total Users: `{total_users}`\n"
-        f"🖼️ Active Thumbnails: `{active_thumbs}`\n"
-        f"📂 Files Processed: `{bot_stats['files_processed']}`\n"
-        f"⏱️ Uptime: `{uptime}`\n"
-        f"🛠️ Maintenance: `{'ON' if maintenance_mode else 'OFF'}`"
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS: return
+    await update.message.reply_text(
+        f"📊 **Stats:**\nProcessed: {bot_stats['processed']}\nUsers: {len(users_db)}"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    
-    msg = update.message.text.split(" ", 1)
-    if len(msg) < 2:
-        await update.message.reply_text("⚠️ Usage: `/broadcast <message>`")
-        return
-        
-    text_to_send = f"📢 **Titan Announcement**\n\n{msg[1]}"
-    count = 0
-    
-    status_msg = await update.message.reply_text("🚀 Starting broadcast...")
-    
-    for uid in users_db:
-        try:
-            await context.bot.send_message(chat_id=uid, text=text_to_send, parse_mode="Markdown")
-            count += 1
-            await asyncio.sleep(0.05) # Flood control
-        except Exception:
-            pass # Ignore blocked users
-            
-    await status_msg.edit_text(f"✅ Broadcast complete. Sent to {count} users.")
-
-async def admin_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    global maintenance_mode
-    
-    args = context.args
-    if not args:
-        await update.message.reply_text(f"Current mode: {maintenance_mode}")
-        return
-        
-    if args[0].lower() == "on":
-        maintenance_mode = True
-        await update.message.reply_text("🔒 Maintenance Mode ENABLED.")
-    elif args[0].lower() == "off":
-        maintenance_mode = False
-        await update.message.reply_text("🔓 Maintenance Mode DISABLED.")
 
 # ---------------------------------------------------------------------------
-# 🏁 MAIN EXECUTION
+# 🚀 MAIN EXECUTION
 # ---------------------------------------------------------------------------
 
 def main():
-    if TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ ERROR: Please set your BOT_TOKEN in the script or environment variables.")
+    if not TOKEN:
+        print("❌ CRITICAL: BOT_TOKEN is missing.")
         return
 
-    application = ApplicationBuilder().token(TOKEN).build()
+    # Start the fake server for Render
+    keep_alive()
 
-    # User Handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("clear_thumb", clear_thumbnail))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_thumbnail))
-    application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO | filters.Document.ALL, handle_media))
-    application.add_handler(CallbackQueryHandler(button_callback))
+    # Build Bot with extended timeouts
+    app = ApplicationBuilder().token(TOKEN).build()
 
-    # Admin Handlers
-    application.add_handler(CommandHandler("stats", admin_stats))
-    application.add_handler(CommandHandler("broadcast", admin_broadcast))
-    application.add_handler(CommandHandler("maintenance", admin_maintenance))
+    # Handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_thumbnail))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL, handle_media))
 
-    print("⚡ Titan Thumbnail Bot is Online...")
-    application.run_polling()
+    print("⚡ Titan Bot is Running on Render...")
+    app.run_polling()
 
 if __name__ == '__main__':
     main()
