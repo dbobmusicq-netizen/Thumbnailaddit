@@ -5,18 +5,19 @@ from threading import Thread
 from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
-from telegram.error import BadRequest, TimedOut
+from telegram.error import BadRequest
 
 # ---------------------------------------------------------------------------
-# 🌐 KEEP ALIVE SERVER
+# 🌐 KEEP ALIVE (Required for Render Free Tier Port Binding)
 # ---------------------------------------------------------------------------
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Titan Bot is Alive! 🚀"
+    return "Titan Bot is Running efficiently. 🚀"
 
 def run_flask():
+    # Render expects a web server on port 8080
     app.run(host='0.0.0.0', port=8080)
 
 def start_keep_alive():
@@ -25,7 +26,7 @@ def start_keep_alive():
     t.start()
 
 # ---------------------------------------------------------------------------
-# 🤖 BOT CONFIGURATION
+# ⚙️ CONFIGURATION
 # ---------------------------------------------------------------------------
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -34,87 +35,90 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# 🧠 MEMORY STORAGE
+# 🧠 MEMORY STORAGE (RAM)
 # ---------------------------------------------------------------------------
 users_db = {}
 
 def get_user(user_id):
     if user_id not in users_db:
-        # We store 'thumb_id' to download it later
         users_db[user_id] = {"thumb_id": None}
     return users_db[user_id]
 
 # ---------------------------------------------------------------------------
-# 🛠️ HANDLERS
+# 🛠️ BOT LOGIC
 # ---------------------------------------------------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚡ **Titan Thumbnail Bot Fixed**\n\n"
-        "1. Send a **Photo** (Your Thumbnail)\n"
-        "2. Send a **Video** or **File** (Up to 4GB)\n"
-        "3. I will attach the thumb properly!",
+        "⚡ **Titan Bot (Method-1)**\n\n"
+        "1. Send **Photo** (Sets Thumbnail)\n"
+        "2. Send **Video/File** (Bot attaches thumb by ID)\n\n"
+        "🚀 *Zero-Download Mode Active*",
         parse_mode="Markdown"
     )
 
 async def handle_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    # Get the file_id of the largest photo
+    # We grab the file_id of the photo.
+    # We do NOT download it. We just store the ID string.
     file_id = update.message.photo[-1].file_id
     get_user(user_id)["thumb_id"] = file_id
     
-    await update.message.reply_text("✅ **Thumbnail Set!**\nNow send your Video or File.")
+    await update.message.reply_text(
+        "🖼️ **Thumbnail ID Stored!**\n"
+        "Now send your 4GB Video/Document.",
+        quote=True
+    )
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    The 'Senior Engineer' approach:
+    Reuse file_id for Video AND Reuse file_id for Thumbnail.
+    """
     user_id = update.effective_user.id
     user_data = get_user(user_id)
     msg = update.message
     
-    # 1. Check if user has a thumbnail
+    # 1. Validation
     if not user_data.get("thumb_id"):
-        await msg.reply_text("❌ **No Thumbnail!**\nPlease send a photo first.")
+        await msg.reply_text("❌ **No Thumbnail Set.** Send a photo first!", quote=True)
         return
 
-    status = await msg.reply_text("⚡ **Downloading thumbnail & Processing...**")
+    # 2. Preparation
+    thumb_id = user_data["thumb_id"]
+    caption = msg.caption or "" # Keep original caption
+
+    # Status (Optional, can be removed for speed)
+    status = await msg.reply_text("⚡ **Titanium Plating...**")
 
     try:
-        # 2. CRITICAL FIX: Download the Thumbnail Image to Memory
-        # We cannot pass a file_id for a thumbnail. We must pass the BYTES.
-        thumb_file = await context.bot.get_file(user_data["thumb_id"])
-        thumb_data = await thumb_file.download_as_bytearray()
-
-        # 3. Determine Media Type & ID
-        media_id = msg.video.file_id if msg.video else msg.document.file_id
-        caption = msg.caption or ""
-
-        # 4. Send using the uploaded thumbnail bytes
+        # 3. Execution (The Clean Way)
         if msg.video:
-            await context.bot.send_video(
-                chat_id=msg.chat_id,
-                video=media_id,
-                thumbnail=thumb_data,  # Pass bytes, not ID
+            await msg.reply_video(
+                video=msg.video.file_id,
+                thumbnail=thumb_id,  # PTB v20 uses 'thumbnail', sends to API as 'thumb'
                 caption=caption,
-                supports_streaming=True,
-                read_timeout=120,
-                write_timeout=120
+                supports_streaming=True
             )
-        else:
-            await context.bot.send_document(
-                chat_id=msg.chat_id,
-                document=media_id,
-                thumbnail=thumb_data, # Pass bytes, not ID
-                caption=caption,
-                read_timeout=120,
-                write_timeout=120
+        elif msg.document:
+            await msg.reply_document(
+                document=msg.document.file_id,
+                thumbnail=thumb_id,
+                caption=caption
             )
-
+        
+        # Cleanup
         await status.delete()
 
     except BadRequest as e:
-        await status.edit_text(f"❌ **Telegram Error:** {e}\n\n*Note: Telegram sometimes refuses to change thumbnails for existing files unless sent as a Document.*")
+        logger.error(f"Telegram API Error: {e}")
+        await status.edit_text(
+            f"❌ **Telegram Error:** `{e}`\n\n"
+            "This usually happens if the thumbnail format is invalid or Telegram rejected the ID map."
+        )
     except Exception as e:
-        logger.error(f"Error: {e}")
-        await status.edit_text("❌ Failed to process.")
+        logger.error(f"General Error: {e}")
+        await status.edit_text("❌ System Error.")
 
 # ---------------------------------------------------------------------------
 # 🚀 MAIN
@@ -124,15 +128,20 @@ def main():
         print("❌ ERROR: BOT_TOKEN is missing!")
         return
 
+    # Start Flask so Render doesn't kill the bot
     start_keep_alive()
     
+    # Init Bot
     application = ApplicationBuilder().token(TOKEN).build()
     
+    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.PHOTO, handle_thumbnail))
     application.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL, handle_media))
 
-    print("⚡ Titan Bot Started...")
+    print("⚡ Titan Bot is Online (High Performance Mode)...")
+    
+    # Drop pending updates to prevent startup flood
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
